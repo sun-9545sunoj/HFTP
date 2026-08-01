@@ -1,0 +1,30 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Data & Raw Datasets (Do not commit large multi-GB datasets)
+data/raw/
+*.csv
+*.parquet
+*.txt
+!requirements.txt
+
+# PyTorch Lightning & Checkpoints
+checkpoints/
+lightning_logs/
+*.ckpt
+*.pth
+
+# IDEs & OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+.pytest_cache/
