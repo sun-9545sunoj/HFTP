@@ -29,6 +29,7 @@ class DeepLOBModule(pl.LightningModule):
         num_classes: int = 3,
         learning_rate: float = 1e-3,
         weight_decay: float = 1e-4,
+        dropout: float = 0.2,
         loss_type: str = "focal",
         class_weights: Optional[torch.Tensor] = None,
         focal_gamma: float = 2.0,
@@ -43,6 +44,7 @@ class DeepLOBModule(pl.LightningModule):
                 in_features=in_features,
                 seq_len=seq_len,
                 num_classes=num_classes,
+                dropout=dropout,
             )
         elif model_type.lower() == "transformer":
             self.model = SpatialTemporalTransformerLOB(

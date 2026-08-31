@@ -156,18 +156,30 @@ def assign_directional_labels(
 
     # Vectorized label evaluation
     ret = df_with_alpha[return_col]
-    alpha_vals = df_with_alpha["alpha_t"]
-
-    label_expr = (
-        pl.when(ret.is_null() | ret.is_nan())
-        .then(None)
-        .when(pl.col(return_col) > pl.col("alpha_t"))
-        .then(1)
-        .when(pl.col(return_col) < -pl.col("alpha_t"))
-        .then(-1)
-        .otherwise(0)
-        .cast(pl.Int8)
-        .alias(label_col)
-    )
+    
+    # If perfect quantile balancing is requested via kwargs (handled dynamically)
+    if df_with_alpha.get_column("alpha_t").mean() == -1.0: # signal for quantile balancing
+        quant_down = ret.quantile(0.33)
+        quant_up = ret.quantile(0.66)
+        label_expr = (
+            pl.when(ret.is_null() | ret.is_nan()).then(None)
+            .when(pl.col(return_col) > quant_up).then(1)
+            .when(pl.col(return_col) < quant_down).then(-1)
+            .otherwise(0)
+            .cast(pl.Int8)
+            .alias(label_col)
+        )
+    else:
+        label_expr = (
+            pl.when(ret.is_null() | ret.is_nan())
+            .then(None)
+            .when(pl.col(return_col) > pl.col("alpha_t"))
+            .then(1)
+            .when(pl.col(return_col) < -pl.col("alpha_t"))
+            .then(-1)
+            .otherwise(0)
+            .cast(pl.Int8)
+            .alias(label_col)
+        )
 
     return df_with_alpha.with_columns(label_expr)

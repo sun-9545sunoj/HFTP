@@ -5,7 +5,7 @@ Models realistic HFT execution dynamics:
 1. Fixed execution latency delay (delta t ticks) between signal generation and order placement.
 2. L3/L2 queue priority model tracking volume ahead and queue decay.
 3. Transaction cost model (Maker rebates vs Taker fees and slippage).
-4. Inventory risk holding cost penalization.
+4. Inventory risk holding cost penalization & maximum position risk limits.
 """
 
 from dataclasses import dataclass
@@ -76,15 +76,6 @@ class MicrostructureBacktester:
         inventory_penalty_factor: float = 1e-6,
         queue_decay_rate: float = 0.2,  # 20% volume ahead consumed per tick
     ) -> None:
-        """
-        Args:
-            latency_ticks: Fixed delay between signal generation and order activation.
-            maker_fee: Fee (or negative rebate) for limit order fills.
-            taker_fee: Fee for market order fills.
-            slippage_ticks: Expected tick slippage for market orders.
-            inventory_penalty_factor: Lambda multiplier for inventory penalty (lambda * q^2).
-            queue_decay_rate: Proportion of queue ahead consumed per tick when price matches limit.
-        """
         self.latency_ticks = latency_ticks
         self.maker_fee = maker_fee
         self.taker_fee = taker_fee
@@ -97,6 +88,7 @@ class MicrostructureBacktester:
         lob_df: pl.DataFrame,
         signals: np.ndarray,
         order_size: float = 1.0,
+        max_position: Optional[float] = None,
     ) -> Tuple[PerformanceMetrics, pl.DataFrame]:
         """
         Run event-driven microstructure backtest given a LOB DataFrame and directional signals.
@@ -105,6 +97,7 @@ class MicrostructureBacktester:
             lob_df: Polars DataFrame containing canonical ask_price_1, ask_size_1, bid_price_1, bid_size_1, mid_price.
             signals: Array of signals y_t in {-1, 0, 1} where 1 = BUY, -1 = SELL, 0 = NEUTRAL.
             order_size: Trade size per order.
+            max_position: Maximum inventory position limit (|q_t| <= max_position).
 
         Returns:
             Tuple of (PerformanceMetrics, Polars DataFrame with equity curve & positions).
@@ -144,7 +137,6 @@ class MicrostructureBacktester:
         trade_id_counter: int = 0
         trade_pnls: List[float] = []
 
-        # Previous mid price for trade PnL calculations
         entry_prices: List[float] = []
 
         for t in range(n_ticks):
@@ -153,12 +145,14 @@ class MicrostructureBacktester:
             current_mid = mid_p[t]
             sig = signals[t]
 
-            # 1. Process Signal & Generate Orders (with Latency Delay)
+            # 1. Process Signal & Generate Orders (with Latency Delay & Max Position Limits)
             if sig != 0:
-                order_id_counter += 1
-                placed_orders_count += 1
-                
-                if sig == 1:  # BUY Signal -> Place Limit Buy at Best Bid
+                can_buy = (max_position is None) or (position + order_size <= max_position)
+                can_sell = (max_position is None) or (position - order_size >= -max_position)
+
+                if sig == 1 and can_buy:  # BUY Signal
+                    order_id_counter += 1
+                    placed_orders_count += 1
                     queue_vol = bid_v1[t]
                     new_order = Order(
                         order_id=order_id_counter,
@@ -171,7 +165,10 @@ class MicrostructureBacktester:
                         queue_ahead=queue_vol,
                         status=OrderStatus.PENDING_LATENCY,
                     )
-                else:  # SELL Signal -> Place Limit Sell at Best Ask
+                    orders.append(new_order)
+                elif sig == -1 and can_sell:  # SELL Signal
+                    order_id_counter += 1
+                    placed_orders_count += 1
                     queue_vol = ask_v1[t]
                     new_order = Order(
                         order_id=order_id_counter,
@@ -184,7 +181,7 @@ class MicrostructureBacktester:
                         queue_ahead=queue_vol,
                         status=OrderStatus.PENDING_LATENCY,
                     )
-                orders.append(new_order)
+                    orders.append(new_order)
 
             # 2. Update Pending Orders Status (Activate orders past latency delay)
             for o in orders:
@@ -200,26 +197,22 @@ class MicrostructureBacktester:
                 fill_price = o.price
 
                 if o.side == OrderSide.BUY:
-                    # Immediate fill if market ask drops to or below limit buy price
                     if current_ask <= o.price:
                         filled = True
                         fill_price = current_ask
                     else:
-                        # Decay volume ahead in the queue
                         o.queue_ahead -= o.queue_ahead * self.queue_decay_rate
-                        if o.queue_ahead <= 0.1:  # Front of queue reached
+                        if o.queue_ahead <= 0.1:
                             filled = True
                             fill_price = o.price
 
                 elif o.side == OrderSide.SELL:
-                    # Immediate fill if market bid rises to or above limit sell price
                     if current_bid >= o.price:
                         filled = True
                         fill_price = current_bid
                     else:
-                        # Decay volume ahead in the queue
                         o.queue_ahead -= o.queue_ahead * self.queue_decay_rate
-                        if o.queue_ahead <= 0.1:  # Front of queue reached
+                        if o.queue_ahead <= 0.1:
                             filled = True
                             fill_price = o.price
 
@@ -240,7 +233,6 @@ class MicrostructureBacktester:
                     )
                     trades.append(tr)
 
-                    # Update position and cash
                     if o.side == OrderSide.BUY:
                         position += o.size
                         cash -= (fill_price * o.size + fee)

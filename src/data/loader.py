@@ -63,12 +63,23 @@ class LOBLoader:
         num_levels: int = 10,
         has_extracted_features: bool = True,
     ) -> pl.DataFrame:
-        """Parse FI-2010 dataset file into a standardized Polars DataFrame."""
+        """Parse FI-2010 dataset file (.txt / .csv) into a standardized Polars DataFrame."""
         path = Path(file_path)
         if not path.exists():
             raise FileNotFoundError(f"FI-2010 file not found at: {path}")
 
-        raw_arr = np.loadtxt(path)
+        # Robust loader for space-delimited .txt or comma-delimited .csv (with or without headers)
+        try:
+            df_csv = pl.read_csv(path)
+            # If the first column is an index column (e.g. '', 'Unnamed: 0', '0'), drop it if shape matches
+            if df_csv.columns[0] in ["", "Unnamed: 0", "0"] or df_csv.columns[0].isdigit():
+                if df_csv.width in [150, 41]:
+                    df_csv = df_csv.select(df_csv.columns[1:])
+            raw_arr = df_csv.to_numpy()
+        except Exception:
+            raw_arr = np.loadtxt(path)
+
+        # FI-2010 raw shape is often (149, N_ticks) or (N_ticks, 149)
         if raw_arr.shape[0] == 149 or (has_extracted_features and raw_arr.shape[0] > raw_arr.shape[1]):
             if raw_arr.shape[0] == 149:
                 raw_arr = raw_arr.T
@@ -155,16 +166,6 @@ class LOBLoader:
     ) -> pl.DataFrame:
         """
         Parse NSE Stock Limit Order Book CSV or Parquet files (e.g. Zerodha, TrueData, NSE TBT).
-
-        Supports standard 5-level retail broker depth or 10/20 level institutional TBT feeds.
-
-        Args:
-            file_path: Path to CSV or Parquet file containing NSE LOB tick data.
-            num_levels: Number of depth levels (default: 5 for standard NSE broker depth, 10 for TBT).
-            column_mapping: Custom dictionary mapping existing column names to canonical names.
-
-        Returns:
-            Standardized Polars DataFrame with canonical LOB columns and mid_price in INR.
         """
         path = Path(file_path)
         if not path.exists():
@@ -178,7 +179,6 @@ class LOBLoader:
         if column_mapping:
             df_raw = df_raw.rename(column_mapping)
 
-        # Standardize column naming if columns follow patterns like 'bp1', 'bs1', 'ap1', 'as1' or 'bid_price_1'
         rename_dict = {}
         for col in df_raw.columns:
             lower_col = col.lower()
@@ -201,7 +201,6 @@ class LOBLoader:
         if "timestamp" not in df_raw.columns:
             df_raw = df_raw.with_columns(pl.Series("timestamp", np.arange(len(df_raw), dtype=np.int64)))
 
-        # Ensure mid-price column exists
         df = df_raw.with_columns(
             ((pl.col("ask_price_1") + pl.col("bid_price_1")) / 2.0).alias("mid_price")
         )

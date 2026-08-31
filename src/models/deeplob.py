@@ -92,6 +92,7 @@ class DeepLOB(nn.Module):
             nn.BatchNorm2d(16),
             nn.LeakyReLU(0.01),
         )
+        self.drop1 = nn.Dropout2d(dropout * 0.5)  # Light spatial dropout after stage 1
 
         # Spatial Convolutional Stage 2
         self.conv2 = nn.Sequential(
@@ -105,6 +106,7 @@ class DeepLOB(nn.Module):
             nn.BatchNorm2d(32),
             nn.LeakyReLU(0.01),
         )
+        self.drop2 = nn.Dropout2d(dropout * 0.5)  # Light spatial dropout after stage 2
 
         # Spatial Convolutional Stage 3
         conv3_in_width = in_features // 4
@@ -117,6 +119,7 @@ class DeepLOB(nn.Module):
         # Inception Multi-Scale Spatial-Temporal Blocks
         self.inception1 = InceptionModule(64, 64)
         self.inception2 = InceptionModule(64, 64)
+        self.drop_inception = nn.Dropout2d(dropout)  # Heavier dropout after inception
 
         # Temporal Sequence Processing (LSTM)
         self.lstm = nn.LSTM(
@@ -147,14 +150,14 @@ class DeepLOB(nn.Module):
             # Reshape (B, T, F) to (B, 1, T, F)
             x = x.unsqueeze(1)
 
-        # Spatial Conv Stages
-        x = self.conv1(x)
-        x = self.conv2(x)
+        # Spatial Conv Stages with L2-friendly dropout
+        x = self.drop1(self.conv1(x))
+        x = self.drop2(self.conv2(x))
         x = self.conv3(x)  # Shape: (B, 64, T, 1)
 
         # Inception Blocks
         x = self.inception1(x)
-        x = self.inception2(x)  # Shape: (B, 64, T, 1)
+        x = self.drop_inception(self.inception2(x))  # Shape: (B, 64, T, 1)
 
         # Prepare for LSTM: (B, 64, T, 1) -> (B, T, 64)
         x = x.squeeze(-1).permute(0, 2, 1)

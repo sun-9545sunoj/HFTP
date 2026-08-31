@@ -2,10 +2,10 @@
 PyTorch Lightning Training Script for DeepLOB & Spatial-Temporal Transformer Models.
 
 Supports training on:
-1. NSE Stock LOB Data (--dataset_type nse --file_path data/RELIANCE_LOB.csv)
-2. Real FI-2010 Benchmark Datasets (--dataset_type fi2010 --file_path data/Train_Dst.txt)
-3. Real LOBSTER L2/L3 Datasets (--dataset_type lobster --file_path data/orderbook.csv --message_path data/message.csv)
-4. Synthetic Demonstration Datasets (--dataset_type synthetic)
+1. Enriched Microstructure Features (--use_micro_features)
+2. NSE Stock LOB Data (--dataset_type nse --file_path data/RELIANCE_LOB.csv)
+3. Real FI-2010 Benchmark Datasets (--dataset_type fi2010 --file_path data/Train_Dst.txt)
+4. Real LOBSTER L2/L3 Datasets (--dataset_type lobster --file_path data/orderbook.csv --message_path data/message.csv)
 """
 
 import argparse
@@ -23,7 +23,6 @@ from src.models.lightning_module import DeepLOBModule
 
 
 def generate_synthetic_training_data(n_ticks: int = 1000, num_levels: int = 10) -> pl.DataFrame:
-    """Generate synthetic 10-level LOB dataset for training demonstration."""
     dict_data = {"timestamp": list(range(n_ticks))}
     np.random.seed(42)
     base_mid = 100.0 + np.cumsum(np.random.normal(0, 0.05, n_ticks))
@@ -43,7 +42,6 @@ def load_dataset(
     message_path: str = None,
     num_levels: int = 10,
 ) -> pl.DataFrame:
-    """Load LOB dataset from NSE, FI-2010, LOBSTER, or Synthetic generator."""
     if dataset_type == "nse":
         if not file_path or not Path(file_path).exists():
             raise FileNotFoundError(f"NSE dataset file not found at: {file_path}")
@@ -55,6 +53,12 @@ def load_dataset(
             raise FileNotFoundError(f"FI-2010 file not found at: {file_path}")
         print(f"-> Ingesting FI-2010 Benchmark Dataset from: {file_path}")
         return LOBLoader.load_fi2010(file_path, num_levels=num_levels)
+
+    elif dataset_type == "parquet":
+        if not file_path or not Path(file_path).exists():
+            raise FileNotFoundError(f"Parquet file not found at: {file_path}")
+        print(f"-> Ingesting Parquet Dataset from: {file_path}")
+        return pl.read_parquet(file_path)
 
     elif dataset_type == "lobster":
         if not file_path or not Path(file_path).exists():
@@ -72,53 +76,73 @@ def load_dataset(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Train DeepLOB / Transformer models on NSE, FI-2010, or LOBSTER dataset.")
-    parser.add_argument("--dataset_type", type=str, default="synthetic", choices=["synthetic", "nse", "fi2010", "lobster"], help="Dataset format.")
-    parser.add_argument("--file_path", type=str, default=None, help="Path to NSE/FI-2010 file or LOBSTER orderbook csv.")
-    parser.add_argument("--message_path", type=str, default=None, help="Optional path to LOBSTER message csv.")
-    parser.add_argument("--model_type", type=str, default="deeplob", choices=["deeplob", "transformer"], help="Model architecture.")
-    parser.add_argument("--epochs", type=int, default=5, help="Number of training epochs.")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size.")
+    parser = argparse.ArgumentParser(description="Train DeepLOB / Transformer models with performance optimizations.")
+    parser.add_argument("--dataset_type", type=str, default="synthetic", choices=["synthetic", "nse", "fi2010", "lobster", "parquet"])
+    parser.add_argument("--file_path", type=str, default=None)
+    parser.add_argument("--message_path", type=str, default=None)
+    parser.add_argument("--model_type", type=str, default="deeplob", choices=["deeplob", "transformer"])
+    parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs.")
+    parser.add_argument("--batch_size", type=int, default=128, help="Batch size.")
     parser.add_argument("--seq_len", type=int, default=100, help="Sequence length T.")
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate.")
+    parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate.")
     parser.add_argument("--k", type=int, default=5, help="Lookahead return window k ticks.")
-    parser.add_argument("--loss_type", type=str, default="focal", choices=["focal", "weighted_ce", "ce"], help="Loss function.")
-    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints", help="Directory to save model checkpoints.")
+    parser.add_argument("--loss_type", type=str, default="focal", choices=["focal", "weighted_ce", "ce"])
+    parser.add_argument("--weight_decay", type=float, default=1e-4, help="L2 regularization weight decay.")
+    parser.add_argument("--dropout", type=float, default=0.2, help="Dropout rate for regularization.")
+    parser.add_argument("--use_micro_features", action="store_true", help="Include engineered microstructure features (OFI, Micro-price, VWAP).")
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
+    parser.add_argument("--resume_checkpoint", type=str, default=None, help="Path to checkpoint to resume training from.")
     args = parser.parse_args()
 
     print("=========================================================")
-    print(f"    LOB Model Training ({args.model_type.upper()} on {args.dataset_type.upper()})    ")
+    print(f"   Enhanced Training ({args.model_type.upper()} on {args.dataset_type.upper()})   ")
     print("=========================================================\n")
 
     # 1. Prepare Data
     print("[1/4] Ingesting LOB dataset & computing target labels...")
-    raw_df = load_dataset(
+    df_raw = load_dataset(
         dataset_type=args.dataset_type,
         file_path=args.file_path,
         message_path=args.message_path,
         num_levels=10,
     )
 
-    df_mid = compute_mid_price(raw_df)
-    df_ret = compute_smoothed_returns(df_mid, k=args.k)
-    df_labeled = assign_directional_labels(
-        df_ret,
-        return_col=f"return_{args.k}",
-        use_dynamic_volatility=True,
-    )
+    if args.dataset_type == "parquet":
+        print("-> Dataset is Parquet format. Skipping redundant feature extraction and labeling.")
+        df_features = df_raw
+        if "label" not in df_features.columns:
+            raise ValueError("Parquet file must contain 'label' column.")
+    else:
+        # 1. Feature Engineering & Target Labeling
+        print("[1/4] Computing Labels and Microstructure Features...")
+        num_levels_raw = 10 if args.dataset_type in ["fi2010", "lobster"] else 5
+        df_mid = compute_mid_price(df_raw, ask_col="ask_price_1", bid_col="bid_price_1")
+        df_ret = compute_smoothed_returns(df_mid, k=args.k)
+        df_labeled = assign_directional_labels(
+            df_ret,
+            return_col=f"return_{args.k}",
+            use_dynamic_volatility=True,
+            volatility_multiplier=0.5,
+        )
+        
+        if args.use_micro_features:
+            df_features = extract_all_microstructure_features(df_labeled, num_levels=num_levels_raw)
+        else:
+            df_features = df_labeled
 
-    print(f"-> Ticks Processed: {len(df_labeled):,} rows")
-    label_counts = df_labeled["label"].value_counts().to_dict()
-    print(f"-> Directional Class Distribution: {dict(zip(label_counts['label'], label_counts['count']))}\n")
-
-    # 2. Extract Microstructure Features
-    num_levels_feat = 5 if args.dataset_type == "nse" else 10
-    print(f"[2/4] Engineering microstructure features across {num_levels_feat} levels...")
-    df_features = extract_all_microstructure_features(df_labeled, num_levels=num_levels_feat)
-    canonical_cols = LOBLoader.get_canonical_column_names(num_levels=num_levels_feat)
+    if args.use_micro_features or args.dataset_type == "parquet":
+        canonical_cols = [
+            c for c in df_features.columns 
+            if c not in ["timestamp", "label", f"return_{args.k}", "alpha_t"] 
+            and not df_features[c].is_null().all()
+        ]
+        print(f"-> Using Enriched Feature Set: {len(canonical_cols)} features.")
+    else:
+        canonical_cols = LOBLoader.get_canonical_column_names(num_levels=num_levels_feat)
+        print(f"-> Using Standard LOB Feature Set: {len(canonical_cols)} raw features.")
     
     # 3. Create PyTorch DataLoaders
-    print(f"[3/4] Creating chronological DataLoaders (Sequence Length T={args.seq_len})...")
+    print(f"[3/4] Creating DataLoaders (Sequence Length T={args.seq_len}, Batch Size={args.batch_size})...")
     train_loader, val_loader, test_loader, class_weights = create_chronological_dataloaders(
         df_features,
         feature_cols=canonical_cols,
@@ -135,6 +159,8 @@ def main():
         seq_len=args.seq_len,
         num_classes=3,
         learning_rate=args.lr,
+        weight_decay=args.weight_decay,
+        dropout=args.dropout,
         loss_type=args.loss_type,
         class_weights=class_weights,
     )
@@ -144,10 +170,16 @@ def main():
     
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_dir,
-        filename=f"{args.dataset_type}-{args.model_type}-best-{{epoch:02d}}-{{val_f1_macro:.4f}}",
+        filename=f"enhanced-{args.dataset_type}-{args.model_type}-best-{{epoch:02d}}-{{val_f1_macro:.4f}}",
         monitor="val_loss",
         mode="min",
         save_top_k=1,
+    )
+
+    early_stop_callback = EarlyStopping(
+        monitor="val_loss",
+        patience=4,
+        mode="min",
     )
 
     # 5. Trainer Execution
@@ -155,11 +187,19 @@ def main():
     trainer = pl_trainer.Trainer(
         max_epochs=args.epochs,
         accelerator="auto",
-        callbacks=[checkpoint_callback],
-        log_every_n_steps=5,
+        devices=1,
+        callbacks=[checkpoint_callback, early_stop_callback],
+        enable_progress_bar=True,
     )
 
-    trainer.fit(model_module, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    print(f"\n[4/4] Commencing Training Phase (Max Epochs: {args.epochs})...")
+    
+    if args.resume_checkpoint:
+        print(f"-> Resuming from checkpoint: {args.resume_checkpoint}")
+        trainer.fit(model_module, train_dataloaders=train_loader, val_dataloaders=val_loader, ckpt_path=args.resume_checkpoint)
+    else:
+        trainer.fit(model_module, train_dataloaders=train_loader, val_dataloaders=val_loader)
+        
     print(f"\n-> Training Complete! Best model checkpoint saved to: {checkpoint_dir}")
 
 
