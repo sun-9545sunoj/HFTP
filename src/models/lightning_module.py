@@ -11,7 +11,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 import torchmetrics
 
-from src.models.deeplob import DeepLOB, SpatialTemporalTransformerLOB
+from src.models.deeplob import DeepLOB, SpatialTemporalTransformerLOB, TransLOB
 from src.models.loss import ClassWeightedCrossEntropy, FocalLoss
 
 
@@ -52,8 +52,13 @@ class DeepLOBModule(pl.LightningModule):
                 seq_len=seq_len,
                 num_classes=num_classes,
             )
+        elif model_type.lower() == "translob":
+            self.model = TransLOB(
+                in_features=in_features,
+                dropout=dropout,
+            )
         else:
-            raise ValueError(f"Unknown model_type '{model_type}'. Choose 'deeplob' or 'transformer'.")
+            raise ValueError(f"Unknown model_type '{model_type}'. Choose 'deeplob', 'transformer', or 'translob'.")
 
         # Loss function setup
         if loss_type == "focal":

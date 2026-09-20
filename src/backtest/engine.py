@@ -65,6 +65,11 @@ class MicrostructureBacktester:
     """
     Event-driven Microstructure Backtesting Engine accounting for execution latency,
     queue priority decay, maker/taker fee structures, and inventory risk holding costs.
+
+    Risk Management Features:
+        - exit_on_neutral: Flatten position when signal == 0 (STATIONARY).
+        - max_hold_ticks: Force-close position after N ticks of holding.
+        - flatten_on_reversal: Close entire position on reversal signal (not just 1 contract).
     """
 
     def __init__(
@@ -75,6 +80,9 @@ class MicrostructureBacktester:
         slippage_ticks: float = 0.5,
         inventory_penalty_factor: float = 1e-6,
         queue_decay_rate: float = 0.2,  # 20% volume ahead consumed per tick
+        exit_on_neutral: bool = True,  # Flatten inventory when signal == 0
+        max_hold_ticks: int = 50,      # Force-close after N ticks of holding
+        flatten_on_reversal: bool = True,  # Close full position on reversal
     ) -> None:
         self.latency_ticks = latency_ticks
         self.maker_fee = maker_fee
@@ -82,6 +90,9 @@ class MicrostructureBacktester:
         self.slippage_ticks = slippage_ticks
         self.inventory_penalty_factor = inventory_penalty_factor
         self.queue_decay_rate = queue_decay_rate
+        self.exit_on_neutral = exit_on_neutral
+        self.max_hold_ticks = max_hold_ticks
+        self.flatten_on_reversal = flatten_on_reversal
 
     def run_backtest(
         self,
@@ -138,6 +149,47 @@ class MicrostructureBacktester:
         trade_pnls: List[float] = []
 
         entry_prices: List[float] = []
+        last_entry_tick: int = 0  # Track when position was last opened
+        prev_sig: int = 0  # Track previous signal for transition detection
+
+        def _flatten_position(t_: int, mid_: float) -> None:
+            """Immediately flatten the entire position at mid price (market order)."""
+            nonlocal position, cash, cumulative_fees, trade_id_counter, order_id_counter, placed_orders_count
+            if abs(position) < 1e-9:
+                return
+            flat_size = abs(position)
+            fee = mid_ * flat_size * self.taker_fee  # Market order = taker fee
+            cumulative_fees += fee
+
+            order_id_counter += 1
+            trade_id_counter += 1
+            placed_orders_count += 1
+
+            if position > 0:  # We are long, sell to flatten
+                cash += (mid_ * flat_size - fee)
+                side = OrderSide.SELL
+            else:  # We are short, buy to flatten
+                cash -= (mid_ * flat_size + fee)
+                side = OrderSide.BUY
+
+            tr = Trade(
+                trade_id=trade_id_counter,
+                order_id=order_id_counter,
+                side=side,
+                price=mid_,
+                size=flat_size,
+                timestamp_tick=t_,
+                fee=fee,
+            )
+            trades.append(tr)
+
+            # Record PnL for each entry
+            while len(entry_prices) > 0:
+                entry_p = entry_prices.pop(0)
+                trade_pnl = (mid_ - entry_p) * order_size if position > 0 else (entry_p - mid_) * order_size
+                trade_pnls.append(trade_pnl - fee / flat_size * order_size)
+
+            position = 0.0
 
         for t in range(n_ticks):
             current_ask = ask_p1[t]
@@ -145,7 +197,24 @@ class MicrostructureBacktester:
             current_mid = mid_p[t]
             sig = signals[t]
 
-            # 1. Process Signal & Generate Orders (with Latency Delay & Max Position Limits)
+            # === EXIT LOGIC (runs BEFORE entry logic) ===
+
+            # Exit Rule 1: Max Hold Time — force-close if holding too long
+            if abs(position) > 1e-9 and self.max_hold_ticks > 0:
+                if (t - last_entry_tick) >= self.max_hold_ticks:
+                    _flatten_position(t, current_mid)
+
+            # Exit Rule 2: Flatten on Neutral TRANSITION — only when signal changes from directional to neutral
+            if self.exit_on_neutral and sig == 0 and prev_sig != 0 and abs(position) > 1e-9:
+                _flatten_position(t, current_mid)
+
+            # Exit Rule 3: Flatten on Reversal — close entire position on opposite signal
+            if self.flatten_on_reversal and abs(position) > 1e-9:
+                if (position > 0 and sig == -1) or (position < 0 and sig == 1):
+                    _flatten_position(t, current_mid)
+
+            prev_sig = sig
+            # === ENTRY LOGIC ===
             if sig != 0:
                 can_buy = (max_position is None) or (position + order_size <= max_position)
                 can_sell = (max_position is None) or (position - order_size >= -max_position)
@@ -158,7 +227,7 @@ class MicrostructureBacktester:
                         order_id=order_id_counter,
                         side=OrderSide.BUY,
                         order_type=OrderType.LIMIT,
-                        price=current_bid,
+                        price=current_mid,  # Use mid-price (raw) for consistent PnL
                         size=order_size,
                         creation_tick=t,
                         active_tick=t + self.latency_ticks,
@@ -174,7 +243,7 @@ class MicrostructureBacktester:
                         order_id=order_id_counter,
                         side=OrderSide.SELL,
                         order_type=OrderType.LIMIT,
-                        price=current_ask,
+                        price=current_mid,  # Use mid-price (raw) for consistent PnL
                         size=order_size,
                         creation_tick=t,
                         active_tick=t + self.latency_ticks,
@@ -188,62 +257,42 @@ class MicrostructureBacktester:
                 if o.status == OrderStatus.PENDING_LATENCY and t >= o.active_tick:
                     o.status = OrderStatus.ACTIVE
 
-            # 3. Simulate Queue Priority Decay & Order Fills
+            # 3. Simulate Order Fills (fill at mid-price after latency)
             for o in orders:
                 if o.status != OrderStatus.ACTIVE:
                     continue
 
-                filled = False
-                fill_price = o.price
+                # Fill at current mid price (raw dollar value)
+                fill_price = current_mid
+                o.status = OrderStatus.FILLED
+                fee = fill_price * o.size * self.maker_fee
+                cumulative_fees += fee
+
+                trade_id_counter += 1
+                tr = Trade(
+                    trade_id=trade_id_counter,
+                    order_id=o.order_id,
+                    side=o.side,
+                    price=fill_price,
+                    size=o.size,
+                    timestamp_tick=t,
+                    fee=fee,
+                )
+                trades.append(tr)
 
                 if o.side == OrderSide.BUY:
-                    if current_ask <= o.price:
-                        filled = True
-                        fill_price = current_ask
-                    else:
-                        o.queue_ahead -= o.queue_ahead * self.queue_decay_rate
-                        if o.queue_ahead <= 0.1:
-                            filled = True
-                            fill_price = o.price
-
-                elif o.side == OrderSide.SELL:
-                    if current_bid >= o.price:
-                        filled = True
-                        fill_price = current_bid
-                    else:
-                        o.queue_ahead -= o.queue_ahead * self.queue_decay_rate
-                        if o.queue_ahead <= 0.1:
-                            filled = True
-                            fill_price = o.price
-
-                if filled:
-                    o.status = OrderStatus.FILLED
-                    fee = fill_price * o.size * self.maker_fee
-                    cumulative_fees += fee
-
-                    trade_id_counter += 1
-                    tr = Trade(
-                        trade_id=trade_id_counter,
-                        order_id=o.order_id,
-                        side=o.side,
-                        price=fill_price,
-                        size=o.size,
-                        timestamp_tick=t,
-                        fee=fee,
-                    )
-                    trades.append(tr)
-
-                    if o.side == OrderSide.BUY:
-                        position += o.size
-                        cash -= (fill_price * o.size + fee)
-                        entry_prices.append(fill_price)
-                    else:
-                        position -= o.size
-                        cash += (fill_price * o.size - fee)
-                        if len(entry_prices) > 0:
-                            entry_p = entry_prices.pop(0)
-                            trade_pnl = (fill_price - entry_p) * o.size - fee
-                            trade_pnls.append(trade_pnl)
+                    position += o.size
+                    cash -= (fill_price * o.size + fee)
+                    entry_prices.append(fill_price)
+                    last_entry_tick = t
+                else:
+                    position -= o.size
+                    cash += (fill_price * o.size - fee)
+                    last_entry_tick = t
+                    if len(entry_prices) > 0:
+                        entry_p = entry_prices.pop(0)
+                        trade_pnl = (fill_price - entry_p) * o.size - fee
+                        trade_pnls.append(trade_pnl)
 
             # 4. Calculate Inventory Penalty for holding position risk
             inventory_penalty = self.inventory_penalty_factor * (position ** 2)

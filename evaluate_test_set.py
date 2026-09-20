@@ -93,7 +93,7 @@ def evaluate_on_test_set(
     else:
         feature_cols = [
             c for c in df_clean.columns 
-            if c not in ["timestamp", "label", f"return_{k}", "alpha_t", "mid_price"] 
+            if c not in ["timestamp", "label", f"return_{k}", "alpha_t"] 
             and not df_clean[c].is_null().all()
         ][:in_features_count]
 
@@ -172,6 +172,9 @@ def evaluate_on_test_set(
         maker_fee=-0.0001,
         taker_fee=0.0004,
         inventory_penalty_factor=1e-5,
+        exit_on_neutral=False,    # Let alpha develop; don't close on every neutral tick
+        max_hold_ticks=50,        # Force-close after 50 ticks to limit inventory risk
+        flatten_on_reversal=True, # Close entire position on opposite signal
     )
     metrics, df_backtest = backtester.run_backtest(
         df_clean,

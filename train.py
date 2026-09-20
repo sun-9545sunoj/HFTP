@@ -80,7 +80,13 @@ def main():
     parser.add_argument("--dataset_type", type=str, default="synthetic", choices=["synthetic", "nse", "fi2010", "lobster", "parquet"])
     parser.add_argument("--file_path", type=str, default=None)
     parser.add_argument("--message_path", type=str, default=None)
-    parser.add_argument("--model_type", type=str, default="deeplob", choices=["deeplob", "transformer"])
+    parser.add_argument(
+        "--model_type",
+        type=str,
+        default="deeplob",
+        choices=["deeplob", "transformer", "translob"],
+        help="Model architecture to train",
+    )
     parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs.")
     parser.add_argument("--batch_size", type=int, default=128, help="Batch size.")
     parser.add_argument("--seq_len", type=int, default=100, help="Sequence length T.")

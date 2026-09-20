@@ -28,3 +28,6 @@ lightning_logs/
 .vscode/
 *.swp
 .pytest_cache/
+
+# Reports (local artifacts)
+reports/
