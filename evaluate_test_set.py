@@ -169,8 +169,8 @@ def evaluate_on_test_set(
 
     backtester = MicrostructureBacktester(
         latency_ticks=2,
-        maker_fee=-0.0001,
-        taker_fee=0.0004,
+        maker_fee_per_share=-0.002,   # $0.002 rebate per share (limit order entry)
+        taker_fee_per_share=0.003,    # $0.003 fee per share (market order exit)
         inventory_penalty_factor=1e-5,
         exit_on_neutral=False,    # Let alpha develop; don't close on every neutral tick
         max_hold_ticks=50,        # Force-close after 50 ticks to limit inventory risk

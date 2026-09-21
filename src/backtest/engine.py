@@ -75,8 +75,8 @@ class MicrostructureBacktester:
     def __init__(
         self,
         latency_ticks: int = 2,
-        maker_fee: float = -0.0001,  # 1 bps rebate for limit orders
-        taker_fee: float = 0.0004,   # 4 bps fee for market orders
+        maker_fee_per_share: float = -0.002,   # Flat $0.002 rebate per share (maker)
+        taker_fee_per_share: float = 0.003,     # Flat $0.003 fee per share (taker)
         slippage_ticks: float = 0.5,
         inventory_penalty_factor: float = 1e-6,
         queue_decay_rate: float = 0.2,  # 20% volume ahead consumed per tick
@@ -85,8 +85,8 @@ class MicrostructureBacktester:
         flatten_on_reversal: bool = True,  # Close full position on reversal
     ) -> None:
         self.latency_ticks = latency_ticks
-        self.maker_fee = maker_fee
-        self.taker_fee = taker_fee
+        self.maker_fee_per_share = maker_fee_per_share
+        self.taker_fee_per_share = taker_fee_per_share
         self.slippage_ticks = slippage_ticks
         self.inventory_penalty_factor = inventory_penalty_factor
         self.queue_decay_rate = queue_decay_rate
@@ -158,7 +158,7 @@ class MicrostructureBacktester:
             if abs(position) < 1e-9:
                 return
             flat_size = abs(position)
-            fee = mid_ * flat_size * self.taker_fee  # Market order = taker fee
+            fee = self.taker_fee_per_share * flat_size  # Flat per-share taker fee
             cumulative_fees += fee
 
             order_id_counter += 1
@@ -265,7 +265,7 @@ class MicrostructureBacktester:
                 # Fill at current mid price (raw dollar value)
                 fill_price = current_mid
                 o.status = OrderStatus.FILLED
-                fee = fill_price * o.size * self.maker_fee
+                fee = self.maker_fee_per_share * o.size  # Flat per-share maker fee (rebate)
                 cumulative_fees += fee
 
                 trade_id_counter += 1
