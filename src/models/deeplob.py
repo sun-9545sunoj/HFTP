@@ -219,97 +219,11 @@ class SpatialTemporalTransformerLOB(nn.Module):
         # Global pooling over sequence dimension
         pooled = out.mean(dim=1)
         return self.classifier(pooled)
-    def __init__(self, d_model: int, max_len: int = 500):
-        super().__init__()
-        position = torch.arange(max_len).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
-        pe = torch.zeros(1, max_len, d_model)
-        pe[0, :, 0::2] = torch.sin(position * div_term)
-        pe[0, :, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x shape: (batch_size, seq_len, d_model)"""
-        return x + self.pe[:, :x.size(1), :]
-
-class ResNetBlock1D(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int, dropout: float = 0.2):
-        super().__init__()
-        self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm1d(out_channels)
-        self.relu = nn.ReLU()
-        self.dropout = nn.Dropout(dropout)
-        self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm1d(out_channels)
-        
-        self.downsample = None
-        if in_channels != out_channels:
-            self.downsample = nn.Sequential(
-                nn.Conv1d(in_channels, out_channels, kernel_size=1),
-                nn.BatchNorm1d(out_channels)
-            )
-
-    def forward(self, x):
-        identity = x
-        if self.downsample is not None:
-            identity = self.downsample(x)
-            
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-        out = self.dropout(out)
-        
-        out = self.conv2(out)
-        out = self.bn2(out)
-        
-        out += identity
-        out = self.relu(out)
-        return out
-
-class TransLOB(nn.Module):
-    def __init__(self, in_features: int = 61, d_model: int = 64, num_heads: int = 4, num_layers: int = 3, dropout: float = 0.2):
-        super().__init__()
-        # Spatial Feature Extraction using ResNet 1D over the sequence
-        # Input to Conv1d expects (batch_size, channels, length)
-        # We treat 'in_features' as channels and 'seq_len' as length.
-        self.resnet = nn.Sequential(
-            ResNetBlock1D(in_features, d_model, dropout),
-            ResNetBlock1D(d_model, d_model, dropout)
-        )
-        
-        # Transformer Temporal Modeling
-        self.pos_encoder = PositionalEncoding(d_model=d_model)
-        encoder_layers = nn.TransformerEncoderLayer(
-            d_model=d_model, 
-            nhead=num_heads, 
-            dim_feedforward=d_model * 4, 
-            dropout=dropout,
-            batch_first=True
-        )
-        self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
-        
-        # Classification Head
-        self.fc1 = nn.Linear(d_model, 32)
-        self.relu = nn.ReLU()
-        self.dropout_fc = nn.Dropout(dropout)
-        self.fc2 = nn.Linear(32, 3)
-
-    def forward(self, x):
-        # x shape: (batch_size, 1, seq_len, in_features)
-        x = x.squeeze(1)  # -> (batch_size, seq_len, in_features)
-        
-        # Transpose for Conv1d: (batch_size, in_features, seq_len)
-        x = x.permute(0, 2, 1)
-        
-        # Extract features
-        x = self.resnet(x) # -> (batch_size, d_model, seq_len)
-        
-        # Transpose for Transformer: (batch_size, seq_len, d_model)
-        x = x.permute(0, 2, 1)
-        
-        # Add positional encoding
 
 class PositionalEncoding(nn.Module):
+    """Sinusoidal positional encoding for Transformer architectures."""
+
     def __init__(self, d_model: int, max_len: int = 500):
         super().__init__()
         position = torch.arange(max_len).unsqueeze(1)
@@ -323,7 +237,10 @@ class PositionalEncoding(nn.Module):
         """x shape: (batch_size, seq_len, d_model)"""
         return x + self.pe[:, :x.size(1), :]
 
+
 class ResNetBlock1D(nn.Module):
+    """1D Residual Block for spatial feature extraction over LOB sequences."""
+
     def __init__(self, in_channels: int, out_channels: int, dropout: float = 0.2):
         super().__init__()
         self.conv1 = nn.Conv1d(in_channels, out_channels, kernel_size=3, padding=1)
@@ -332,7 +249,7 @@ class ResNetBlock1D(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.conv2 = nn.Conv1d(out_channels, out_channels, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm1d(out_channels)
-        
+
         self.downsample = None
         if in_channels != out_channels:
             self.downsample = nn.Sequential(
@@ -344,37 +261,43 @@ class ResNetBlock1D(nn.Module):
         identity = x
         if self.downsample is not None:
             identity = self.downsample(x)
-            
+
         out = self.conv1(x)
         out = self.bn1(out)
         out = self.relu(out)
         out = self.dropout(out)
-        
+
         out = self.conv2(out)
         out = self.bn2(out)
-        
+
         out += identity
         out = self.relu(out)
         return out
 
+
 class TransLOB(nn.Module):
+    """
+    TransLOB: ResNet-1D Spatial Extractor + Transformer Encoder for LOB forecasting.
+    Replaces LSTM sequential processing with parallel self-attention.
+    """
+
     def __init__(self, in_features: int = 61, d_model: int = 64, num_heads: int = 4, num_layers: int = 3, dropout: float = 0.2):
         super().__init__()
         self.resnet = nn.Sequential(
             ResNetBlock1D(in_features, d_model, dropout),
             ResNetBlock1D(d_model, d_model, dropout)
         )
-        
+
         self.pos_encoder = PositionalEncoding(d_model=d_model)
         encoder_layers = nn.TransformerEncoderLayer(
-            d_model=d_model, 
-            nhead=num_heads, 
-            dim_feedforward=d_model * 4, 
+            d_model=d_model,
+            nhead=num_heads,
+            dim_feedforward=d_model * 4,
             dropout=dropout,
             batch_first=True
         )
         self.transformer_encoder = nn.TransformerEncoder(encoder_layers, num_layers=num_layers)
-        
+
         self.fc1 = nn.Linear(d_model, 32)
         self.relu = nn.ReLU()
         self.dropout_fc = nn.Dropout(dropout)
