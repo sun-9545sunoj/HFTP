@@ -14,7 +14,7 @@ import torch
 import torch.nn.functional as F
 import torchmetrics
 
-from src.data.dataset import LOBSequenceDataset, map_indices_to_signals
+from src.data.dataset import LOBSequenceDataset, get_model_feature_cols, map_indices_to_signals
 from src.data.loader import LOBLoader
 from src.data.targets import assign_directional_labels, compute_mid_price, compute_smoothed_returns
 from src.features.microstructure import extract_all_microstructure_features
@@ -91,11 +91,7 @@ def evaluate_on_test_set(
     if in_features_count == 40 and dataset_type != "parquet":
         feature_cols = LOBLoader.get_canonical_column_names(num_levels=num_levels)
     else:
-        feature_cols = [
-            c for c in df_clean.columns 
-            if c not in ["timestamp", "label", f"return_{k}", "alpha_t"] 
-            and not df_clean[c].is_null().all()
-        ][:in_features_count]
+        feature_cols = get_model_feature_cols(df_clean, k=k)[:in_features_count]
 
     feature_arr = df_clean.select(feature_cols).to_numpy()
     label_arr = df_clean["label"].to_numpy()

@@ -75,18 +75,20 @@ def compute_smoothed_returns(
         # Not enough ticks to compute smoothed returns
         res_returns = np.full(n, np.nan, dtype=np.float64)
     else:
-        # Vectorized forward rolling sum over next k elements using cumulative sum
-        # sum_{i=1}^k m_{t+i} for index t in 0..n-k-1
-        cum_sum = np.pad(np.cumsum(mid_prices, dtype=np.float64), (1, 0))
-        # cum_sum[idx] = sum(m[0:idx])
-        # sum from t+1 to t+k inclusive = cum_sum[t + k + 1] - cum_sum[t + 1]
-        t_indices = np.arange(n - k)
-        forward_sums = cum_sum[t_indices + k + 1] - cum_sum[t_indices + 1]
-        forward_means = forward_sums / float(k)
+        # Forward mean of m_{t+1..t+k} for t in 0..n-k-1. A sliding window is
+        # used instead of differencing a global cumsum: the cumsum over ~1e6
+        # prices accumulates rounding error (~1e-10 relative), which turned
+        # "no move" ticks into spurious tiny UP/DOWN returns.
+        mids = np.asarray(mid_prices, dtype=np.float64)
+        forward_means = np.lib.stride_tricks.sliding_window_view(mids[1:], k).mean(axis=1)
         
         m_t = mid_prices[: n - k]
         returns_valid = (forward_means - m_t) / m_t
-        
+        # Snap float residue (~1e-16) to exact zero so "no move" stays a tie
+        # under quantile labeling. Real moves are >= half a tick / (k * price),
+        # i.e. orders of magnitude above this cutoff for any listed price.
+        returns_valid[np.abs(returns_valid) < 1e-10] = 0.0
+
         # Tail elements beyond n-k don't have k future ticks available
         res_returns = np.full(n, np.nan, dtype=np.float64)
         res_returns[: n - k] = returns_valid

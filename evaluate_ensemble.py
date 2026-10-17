@@ -19,7 +19,7 @@ import torch
 import torch.nn.functional as F_torch
 import torchmetrics
 
-from src.data.dataset import LOBSequenceDataset, map_indices_to_signals
+from src.data.dataset import LOBSequenceDataset, get_model_feature_cols, map_indices_to_signals
 from src.models.lightning_module import DeepLOBModule
 from src.backtest.engine import MicrostructureBacktester
 
@@ -155,13 +155,8 @@ def evaluate_ensemble(
     print(f"[2/5] Loading test dataset: {Path(test_file_path).name}...")
     df_clean = pl.read_parquet(test_file_path)
 
-    # Use 61 features (same as training)
-    in_features_count = 61
-    feature_cols = [
-        c for c in df_clean.columns
-        if c not in ["timestamp", "label", "return_5", "alpha_t"]
-        and not df_clean[c].is_null().all()
-    ][:in_features_count]
+    # Same feature selection as training (excludes raw mid_price)
+    feature_cols = get_model_feature_cols(df_clean, k=5)
 
     feature_arr = df_clean.select(feature_cols).to_numpy()
     label_arr = df_clean["label"].to_numpy()

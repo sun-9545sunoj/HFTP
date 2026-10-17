@@ -34,6 +34,7 @@ class DeepLOBModule(pl.LightningModule):
         class_weights: Optional[torch.Tensor] = None,
         focal_gamma: float = 2.0,
         scheduler_type: str = "cosine",
+        pooling: str = "mean",
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -51,11 +52,14 @@ class DeepLOBModule(pl.LightningModule):
                 in_features=in_features,
                 seq_len=seq_len,
                 num_classes=num_classes,
+                dropout=dropout,
+                pooling=pooling,
             )
         elif model_type.lower() == "translob":
             self.model = TransLOB(
                 in_features=in_features,
                 dropout=dropout,
+                pooling=pooling,
             )
         else:
             raise ValueError(f"Unknown model_type '{model_type}'. Choose 'deeplob', 'transformer', or 'translob'.")

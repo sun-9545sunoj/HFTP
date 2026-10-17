@@ -189,8 +189,10 @@ class SpatialTemporalTransformerLOB(nn.Module):
         num_layers: int = 2,
         num_classes: int = 3,
         dropout: float = 0.1,
+        pooling: str = "mean",
     ) -> None:
         super().__init__()
+        self.pooling = pooling
         self.input_projection = nn.Linear(in_features, d_model)
         self.pos_encoder = nn.Parameter(torch.zeros(1, seq_len, d_model))
 
@@ -216,8 +218,8 @@ class SpatialTemporalTransformerLOB(nn.Module):
 
         h = self.input_projection(x) + self.pos_encoder[:, : x.size(1), :]
         out = self.transformer_encoder(h)
-        # Global pooling over sequence dimension
-        pooled = out.mean(dim=1)
+        # "last": final time step (most recent tick); "mean": average over time
+        pooled = out[:, -1, :] if self.pooling == "last" else out.mean(dim=1)
         return self.classifier(pooled)
 
 
@@ -281,8 +283,9 @@ class TransLOB(nn.Module):
     Replaces LSTM sequential processing with parallel self-attention.
     """
 
-    def __init__(self, in_features: int = 61, d_model: int = 64, num_heads: int = 4, num_layers: int = 3, dropout: float = 0.2):
+    def __init__(self, in_features: int = 61, d_model: int = 64, num_heads: int = 4, num_layers: int = 3, dropout: float = 0.2, pooling: str = "mean"):
         super().__init__()
+        self.pooling = pooling
         self.resnet = nn.Sequential(
             ResNetBlock1D(in_features, d_model, dropout),
             ResNetBlock1D(d_model, d_model, dropout)
@@ -310,7 +313,7 @@ class TransLOB(nn.Module):
         x = x.permute(0, 2, 1)
         x = self.pos_encoder(x)
         x = self.transformer_encoder(x)
-        x = x.mean(dim=1)
+        x = x[:, -1, :] if self.pooling == "last" else x.mean(dim=1)
         x = self.fc1(x)
         x = self.relu(x)
         x = self.dropout_fc(x)

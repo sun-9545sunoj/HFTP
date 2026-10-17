@@ -15,11 +15,13 @@ import polars as pl
 import pytorch_lightning as pl_trainer
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
 
-from src.data.dataset import create_chronological_dataloaders
+from src.data.dataset import create_chronological_dataloaders, create_segmented_dataloaders, get_model_feature_cols
 from src.data.loader import LOBLoader
 from src.data.targets import assign_directional_labels, compute_mid_price, compute_smoothed_returns
 from src.features.microstructure import extract_all_microstructure_features
+from src.data.augmentation import get_training_augmentation   # LOB-specific augmentation
 from src.models.lightning_module import DeepLOBModule
+from pytorch_lightning import seed_everything
 
 
 def generate_synthetic_training_data(n_ticks: int = 1000, num_levels: int = 10) -> pl.DataFrame:
@@ -98,7 +100,17 @@ def main():
     parser.add_argument("--use_micro_features", action="store_true", help="Include engineered microstructure features (OFI, Micro-price, VWAP).")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints")
     parser.add_argument("--resume_checkpoint", type=str, default=None, help="Path to checkpoint to resume training from.")
+    parser.add_argument("--augment", action="store_true", help="Enable LOB-specific data augmentation during training.")
+    parser.add_argument("--aug_strength", type=str, default="medium", choices=["light", "medium", "heavy"],
+                        help="Augmentation strength preset: light / medium / heavy.")
+    parser.add_argument("--stocks", type=str, default=None,
+                        help="Comma-separated stock filter for the sequential parquet, e.g. AAPL,AMZN,GOOG.")
+    parser.add_argument("--seed", type=int, default=None, help="Global random seed (weights, shuffling, dropout).")
+    parser.add_argument("--pooling", type=str, default="last", choices=["last", "mean"],
+                        help="Sequence pooling for transformer models (last token or mean over time).")
     args = parser.parse_args()
+    if args.seed is not None:
+        seed_everything(args.seed, workers=True)
 
     print("=========================================================")
     print(f"   Enhanced Training ({args.model_type.upper()} on {args.dataset_type.upper()})   ")
@@ -118,6 +130,9 @@ def main():
         df_features = df_raw
         if "label" not in df_features.columns:
             raise ValueError("Parquet file must contain 'label' column.")
+        if args.stocks and "stock" in df_features.columns:
+            df_features = df_features.filter(pl.col("stock").is_in(args.stocks.split(",")))
+            print(f"-> Stock filter: {args.stocks} ({len(df_features):,} rows)")
     else:
         # 1. Feature Engineering & Target Labeling
         print("[1/4] Computing Labels and Microstructure Features...")
@@ -137,11 +152,7 @@ def main():
             df_features = df_labeled
 
     if args.use_micro_features or args.dataset_type == "parquet":
-        canonical_cols = [
-            c for c in df_features.columns 
-            if c not in ["timestamp", "label", f"return_{args.k}", "alpha_t"] 
-            and not df_features[c].is_null().all()
-        ]
+        canonical_cols = get_model_feature_cols(df_features, k=args.k)
         print(f"-> Using Enriched Feature Set: {len(canonical_cols)} features.")
     else:
         canonical_cols = LOBLoader.get_canonical_column_names(num_levels=num_levels_feat)
@@ -149,13 +160,36 @@ def main():
     
     # 3. Create PyTorch DataLoaders
     print(f"[3/4] Creating DataLoaders (Sequence Length T={args.seq_len}, Batch Size={args.batch_size})...")
-    train_loader, val_loader, test_loader, class_weights = create_chronological_dataloaders(
-        df_features,
-        feature_cols=canonical_cols,
-        label_col="label",
-        seq_len=args.seq_len,
-        batch_size=args.batch_size,
-    )
+
+    # Build augmentation pipeline for training (None = disabled for val/test)
+    aug_pipeline = None
+    if args.augment:
+        aug_pipeline = get_training_augmentation(strength=args.aug_strength)
+        print(f"-> Augmentation ENABLED ({args.aug_strength}): {aug_pipeline}")
+    else:
+        print("-> Augmentation DISABLED (pass --augment to enable)")
+
+    if "split" in df_features.columns:
+        # Leak-free sequential parquet: windows built inside (stock, split) segments
+        label_col = f"label_k{args.k}"
+        print(f"-> Sequential dataset: segmented windows, label column '{label_col}'")
+        train_loader, val_loader, test_loader, class_weights = create_segmented_dataloaders(
+            df_features,
+            feature_cols=canonical_cols,
+            label_col=label_col,
+            seq_len=args.seq_len,
+            batch_size=args.batch_size,
+            augmentation=aug_pipeline,
+        )
+    else:
+        train_loader, val_loader, test_loader, class_weights = create_chronological_dataloaders(
+            df_features,
+            feature_cols=canonical_cols,
+            label_col="label",
+            seq_len=args.seq_len,
+            batch_size=args.batch_size,
+            augmentation=aug_pipeline,
+        )
     print(f"-> Train batches: {len(train_loader)} | Val batches: {len(val_loader)} | Class Weights: {class_weights.numpy()}\n")
 
     # 4. Instantiate Lightning Module
@@ -169,6 +203,7 @@ def main():
         dropout=args.dropout,
         loss_type=args.loss_type,
         class_weights=class_weights,
+        pooling=args.pooling,
     )
 
     checkpoint_dir = Path(args.checkpoint_dir)
@@ -176,16 +211,17 @@ def main():
     
     checkpoint_callback = ModelCheckpoint(
         dirpath=checkpoint_dir,
-        filename=f"enhanced-{args.dataset_type}-{args.model_type}-best-{{epoch:02d}}-{{val_f1_macro:.4f}}",
-        monitor="val_loss",
-        mode="min",
+        filename=f"enhanced-{args.dataset_type}-{args.model_type}-k{args.k}-{(args.stocks or 'all').replace(',', '')}{f'-s{args.seed}' if args.seed is not None else ''}-best-{{epoch:02d}}-{{val_f1_macro:.4f}}",
+        monitor="val_f1_macro",
+        mode="max",
         save_top_k=1,
     )
 
     early_stop_callback = EarlyStopping(
-        monitor="val_loss",
-        patience=4,
-        mode="min",
+        monitor="val_f1_macro",
+        patience=5,
+        mode="max",
+        verbose=True,
     )
 
     # 5. Trainer Execution

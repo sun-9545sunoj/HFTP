@@ -1,0 +1,6 @@
+{
+  "method": "rolling_zscore",
+  "window": 1000,
+  "min_samples": 100,
+  "clip": 10.0
+}
